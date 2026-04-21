@@ -1,0 +1,21 @@
+.env
+__pycache__/
+*.pyc
+.DS_Store
+shioaji.log
+*.log
+
+# 個人資料
+briefings.json
+data/briefings.json
+data/custom_symbols.json
+
+# CA 憑證
+*.pem
+*.pfx
+*.p12
+*.cer
+*.crt
+
+# Streamlit secrets（本機用，不上傳）
+.streamlit/secrets.toml
