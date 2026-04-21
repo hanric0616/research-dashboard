@@ -11,41 +11,6 @@ _UA = (
 _IS_LINUX = platform.system() == "Linux"
 
 
-# ── DOM 解析（共用）─────────────────────────────────────────
-
-def _parse_selenium_articles(driver) -> list[dict]:
-    from selenium.webdriver.common.by import By
-    articles = []
-    for selector in ["article.quickie.quickie-body", "article.quickie", ".quickie-body"]:
-        articles = driver.find_elements(By.CSS_SELECTOR, selector)
-        if articles:
-            break
-    results = []
-    for article in articles[:7]:
-        text = (article.get_attribute("textContent") or "").strip()
-        text = re.sub(r"複製短評連結|看更多[^\n]*", "", text).strip()
-        if len(text) < 30:
-            continue
-        url = MM_QUICKIE_URL
-        try:
-            links = article.find_elements(By.CSS_SELECTOR, "a[href*='/blog/']")
-            if links:
-                href = links[0].get_attribute("href") or ""
-                url = href if href.startswith("http") else "https://www.macromicro.me" + href
-        except Exception:
-            pass
-        m = re.match(r"^(\d{4}-\d{2}-\d{2})(【[^】]+】)(.*)$", text, re.DOTALL)
-        if m:
-            results.append({
-                "date": m.group(1),
-                "title": m.group(2),
-                "content": m.group(3).strip()[:800],
-                "url": url,
-            })
-        else:
-            results.append({"date": "", "title": text[:60], "content": text[60:860], "url": url})
-    return results
-
 
 def _parse_playwright_articles(page) -> list[dict]:
     articles = []
@@ -79,6 +44,17 @@ def _parse_playwright_articles(page) -> list[dict]:
 
 # ── Linux：selenium + 系統 chromium ─────────────────────────
 
+_JS_EXTRACT = """
+return Array.from(document.querySelectorAll('article.quickie')).slice(0, 10).map(function(a) {
+    var links = a.querySelectorAll("a[href*='/blog/']");
+    var href = links.length ? links[0].getAttribute('href') : '';
+    return {
+        text: a.textContent || '',
+        href: href
+    };
+});
+"""
+
 def _fetch_mm_selenium() -> list[dict]:
     from selenium import webdriver
     from selenium.webdriver.chrome.service import Service
@@ -86,6 +62,7 @@ def _fetch_mm_selenium() -> list[dict]:
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.support import expected_conditions as EC
+    import time
 
     options = Options()
     options.add_argument("--headless")
@@ -102,16 +79,37 @@ def _fetch_mm_selenium() -> list[dict]:
     )
     try:
         driver.get(MM_QUICKIE_URL)
+        # 等 article.quickie 出現，最多 30 秒
         try:
             WebDriverWait(driver, 30).until(
-                EC.presence_of_element_located(
-                    (By.CSS_SELECTOR, "article.quickie, article.quickie-body, .quickie-body")
-                )
+                EC.presence_of_element_located((By.CSS_SELECTOR, "article.quickie"))
             )
         except Exception:
-            import time
             time.sleep(15)
-        results = _parse_selenium_articles(driver)
+
+        # 用 JS 直接抽 textContent（繞過 hidden 限制）
+        raw = driver.execute_script(_JS_EXTRACT) or []
+
+        results = []
+        for item in raw:
+            text = re.sub(r"複製短評連結|看更多[^\n]*", "", item.get("text", "")).strip()
+            if len(text) < 30:
+                continue
+            href = item.get("href", "")
+            url = (href if href.startswith("http") else "https://www.macromicro.me" + href) if href else MM_QUICKIE_URL
+            m = re.match(r"^(\d{4}-\d{2}-\d{2})(【[^】]+】)(.*)$", text, re.DOTALL)
+            if m:
+                results.append({
+                    "date": m.group(1),
+                    "title": m.group(2),
+                    "content": m.group(3).strip()[:800],
+                    "url": url,
+                })
+            else:
+                results.append({"date": "", "title": text[:60], "content": text[60:860], "url": url})
+            if len(results) >= 7:
+                break
+
         return results or [{"date": "", "title": "無資料（MM 頁面無法解析）", "content": "", "url": MM_QUICKIE_URL}]
     except Exception as e:
         return [{"date": "", "title": f"無法取得 MM 短評（{e}）", "content": "", "url": MM_QUICKIE_URL}]
