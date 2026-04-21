@@ -3,16 +3,51 @@ import re
 import streamlit as st
 from config import MM_QUICKIE_URL
 
-# 雲端（Linux）用系統 chromium；本機 Mac 用 playwright 自帶 binary
-_CHROMIUM_PATH = "/usr/bin/chromium" if platform.system() == "Linux" else None
-
 _UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
 
+_IS_LINUX = platform.system() == "Linux"
 
-def _parse_mm_articles(page) -> list[dict]:
+
+# ── DOM 解析（共用）─────────────────────────────────────────
+
+def _parse_selenium_articles(driver) -> list[dict]:
+    from selenium.webdriver.common.by import By
+    articles = []
+    for selector in ["article.quickie.quickie-body", "article.quickie", ".quickie-body"]:
+        articles = driver.find_elements(By.CSS_SELECTOR, selector)
+        if articles:
+            break
+    results = []
+    for article in articles[:7]:
+        text = (article.text or "").strip()
+        text = re.sub(r"複製短評連結|看更多[^\n]*", "", text).strip()
+        if len(text) < 30:
+            continue
+        url = MM_QUICKIE_URL
+        try:
+            links = article.find_elements(By.CSS_SELECTOR, "a[href*='/blog/']")
+            if links:
+                href = links[0].get_attribute("href") or ""
+                url = href if href.startswith("http") else "https://www.macromicro.me" + href
+        except Exception:
+            pass
+        m = re.match(r"^(\d{4}-\d{2}-\d{2})(【[^】]+】)(.*)$", text, re.DOTALL)
+        if m:
+            results.append({
+                "date": m.group(1),
+                "title": m.group(2),
+                "content": m.group(3).strip()[:800],
+                "url": url,
+            })
+        else:
+            results.append({"date": "", "title": text[:60], "content": text[60:860], "url": url})
+    return results
+
+
+def _parse_playwright_articles(page) -> list[dict]:
     articles = []
     for selector in ["article.quickie.quickie-body", "article.quickie", ".quickie-body"]:
         articles = page.query_selector_all(selector)
@@ -24,8 +59,8 @@ def _parse_mm_articles(page) -> list[dict]:
         text = re.sub(r"複製短評連結|看更多[^\n]*", "", text).strip()
         if len(text) < 30:
             continue
-        blog_links = article.query_selector_all("a[href*='/blog/']")
         url = MM_QUICKIE_URL
+        blog_links = article.query_selector_all("a[href*='/blog/']")
         if blog_links:
             href = blog_links[0].get_attribute("href") or ""
             url = href if href.startswith("http") else "https://www.macromicro.me" + href
@@ -42,8 +77,51 @@ def _parse_mm_articles(page) -> list[dict]:
     return results
 
 
-@st.cache_data(ttl=3600)
-def fetch_mm_quickie() -> list[dict]:
+# ── Linux：selenium + 系統 chromium ─────────────────────────
+
+def _fetch_mm_selenium() -> list[dict]:
+    from selenium import webdriver
+    from selenium.webdriver.chrome.service import Service
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+
+    options = Options()
+    options.add_argument("--headless")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--window-size=1280,900")
+    options.add_argument(f"--user-agent={_UA}")
+    options.binary_location = "/usr/bin/chromium"
+
+    driver = webdriver.Chrome(
+        service=Service("/usr/bin/chromedriver"),
+        options=options,
+    )
+    try:
+        driver.get(MM_QUICKIE_URL)
+        try:
+            WebDriverWait(driver, 30).until(
+                EC.presence_of_element_located(
+                    (By.CSS_SELECTOR, "article.quickie, article.quickie-body, .quickie-body")
+                )
+            )
+        except Exception:
+            import time
+            time.sleep(15)
+        results = _parse_selenium_articles(driver)
+        return results or [{"date": "", "title": "無資料（MM 頁面無法解析）", "content": "", "url": MM_QUICKIE_URL}]
+    except Exception as e:
+        return [{"date": "", "title": f"無法取得 MM 短評（{e}）", "content": "", "url": MM_QUICKIE_URL}]
+    finally:
+        driver.quit()
+
+
+# ── Mac：playwright ──────────────────────────────────────────
+
+def _fetch_mm_playwright() -> list[dict]:
     from playwright.sync_api import sync_playwright
 
     api_articles: list[dict] = []
@@ -72,7 +150,7 @@ def fetch_mm_quickie() -> list[dict]:
 
     try:
         with sync_playwright() as p:
-            launch_kwargs = dict(
+            browser = p.chromium.launch(
                 headless=True,
                 args=[
                     "--no-sandbox",
@@ -83,9 +161,6 @@ def fetch_mm_quickie() -> list[dict]:
                     "--lang=zh-TW",
                 ],
             )
-            if _CHROMIUM_PATH:
-                launch_kwargs["executable_path"] = _CHROMIUM_PATH
-            browser = p.chromium.launch(**launch_kwargs)
             context = browser.new_context(user_agent=_UA, viewport={"width": 1280, "height": 900})
             page = context.new_page()
             page.on("response", _on_response)
@@ -103,7 +178,7 @@ def fetch_mm_quickie() -> list[dict]:
                 browser.close()
                 return api_articles
 
-            dom_results = _parse_mm_articles(page)
+            dom_results = _parse_playwright_articles(page)
             context.close()
             browser.close()
             return dom_results or [
@@ -111,3 +186,12 @@ def fetch_mm_quickie() -> list[dict]:
             ]
     except Exception as e:
         return [{"date": "", "title": f"無法取得 MM 短評（{e}）", "content": "", "url": MM_QUICKIE_URL}]
+
+
+# ── 對外接口 ─────────────────────────────────────────────────
+
+@st.cache_data(ttl=3600)
+def fetch_mm_quickie() -> list[dict]:
+    if _IS_LINUX:
+        return _fetch_mm_selenium()
+    return _fetch_mm_playwright()
