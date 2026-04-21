@@ -22,7 +22,7 @@ def _parse_selenium_articles(driver) -> list[dict]:
             break
     results = []
     for article in articles[:7]:
-        text = (article.text or "").strip()
+        text = (article.get_attribute("textContent") or "").strip()
         text = re.sub(r"複製短評連結|看更多[^\n]*", "", text).strip()
         if len(text) < 30:
             continue
