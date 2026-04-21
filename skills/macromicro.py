@@ -1,6 +1,10 @@
+import platform
 import re
 import streamlit as st
 from config import MM_QUICKIE_URL
+
+# 雲端（Linux）用系統 chromium；本機 Mac 用 playwright 自帶 binary
+_CHROMIUM_PATH = "/usr/bin/chromium" if platform.system() == "Linux" else None
 
 _UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -68,7 +72,7 @@ def fetch_mm_quickie() -> list[dict]:
 
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(
+            launch_kwargs = dict(
                 headless=True,
                 args=[
                     "--no-sandbox",
@@ -79,6 +83,9 @@ def fetch_mm_quickie() -> list[dict]:
                     "--lang=zh-TW",
                 ],
             )
+            if _CHROMIUM_PATH:
+                launch_kwargs["executable_path"] = _CHROMIUM_PATH
+            browser = p.chromium.launch(**launch_kwargs)
             context = browser.new_context(user_agent=_UA, viewport={"width": 1280, "height": 900})
             page = context.new_page()
             page.on("response", _on_response)

@@ -1,20 +1,5 @@
-import subprocess
-import sys
 import streamlit as st
 from datetime import datetime, timedelta
-
-# 雲端環境自動安裝 playwright 瀏覽器
-@st.cache_resource(show_spinner=False)
-def _install_playwright():
-    try:
-        subprocess.run(
-            [sys.executable, "-m", "playwright", "install", "chromium", "--with-deps"],
-            check=True, capture_output=True
-        )
-    except Exception:
-        pass
-
-_install_playwright()
 
 from config import GROQ_KEY, GEMINI_KEY, NOTION_TOKEN, SJ_API_KEY, DEFAULT_SYMBOLS, MEMO_PROMPTS
 from skills.ai import groq_client, _gemini_client, ai_complete, generate_memo
